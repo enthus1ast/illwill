@@ -230,6 +230,7 @@ type
     F12 = (1022, "F12"),
 
     Mouse = (5000, "Mouse") # TODO Mouse event; which number for Mouse?
+    Unicode = (6000, "Unicode")
 
   IllwillError* = object of Exception
 
@@ -581,11 +582,11 @@ else:  # OS X & Linux
       ord(Key.F12):       @["\e[24~"],
     }.toTable
 
-  proc splitInputs(inp: openarray[int], max: int): seq[seq[int]] =
+  proc splitInputs(inp: openarray[int]): seq[seq[int]] =
     ## splits the input buffer to extract mouse coordinates
     var parts: seq[seq[int]] = @[]
     var cur: seq[int] = @[]
-    for ii in inp[CSI.len+1 .. max-1]:
+    for ii in inp[CSI.len+1 .. ^1]:
       if ii == ord('M'):
         ## Button press
         parts.add cur
@@ -610,7 +611,7 @@ else:  # OS X & Linux
     result = parseInt(str)
 
   proc fillGlobalMouseInfo(keyBuf: array[KeySequenceMaxLen, int]) =
-    let parts = splitInputs(keyBuf, keyBuf.len) # TODO charsRead is wrong?
+    let parts = splitInputs(keyBuf) # TODO charsRead is wrong?
     gMouseInfo.x = parts[1].getPos() - 1
     gMouseInfo.y = parts[2].getPos() - 1
     let bitset = parts[0].getPos()
@@ -633,9 +634,11 @@ else:  # OS X & Linux
     else:
       gMouseInfo.scrollDir = ScrollDirection.ScrollNone
 
-  proc parseKey(charsRead: int): Key =
+  proc parseKey(charsRead: int): tuple[key: Key, rune: string] =
     # Inspired by
+    # echo charsRead, ": ", keyBuf
     # https://github.com/mcandre/charm/blob/master/lib/charm.c
+    var inputSeq = ""
     var key = Key.None
     if charsRead == 1:
       let ch = keyBuf[0]
@@ -652,19 +655,22 @@ else:  # OS X & Linux
 
     elif charsRead > 3 and keyBuf[0] == 27 and keyBuf[1] == 91 and keyBuf[2] == 60:
       fillGlobalMouseInfo(keyBuf)
-      return Key.Mouse
+      return (Key.Mouse, "")
 
     else:
-      var inputSeq = ""
+      inputSeq = ""
       for i in 0..<charsRead:
         inputSeq &= char(keyBuf[i])
       for keyCode, sequences in keySequences.pairs:
         for s in sequences:
           if s == inputSeq:
             key = toKey(keyCode)
-    result = key
+    # echo result
+    if key == Key.None and inputSeq.validateUtf8 == -1:
+      key = Key.Unicode
+    result = (key, inputSeq)
 
-  proc getKeyAsync(): Key =
+  proc getKeyAsyncImpl(): tuple[key: Key, rune: string] =
     var i = 0
     while kbhit() > 0 and i < KeySequenceMaxLen:
       var ret = read(0, keyBuf[i].addr, 1)
@@ -673,9 +679,15 @@ else:  # OS X & Linux
       else:
         break
     if i == 0:  # nothing read
-      result = Key.None
+      result = (Key.None, "")
     else:
       result = parseKey(i)
+
+  proc getKeyAsync(): Key =
+    return getKeyAsyncImpl().key
+
+  proc getKeyAsyncUnicode(): tuple[key: Key, rune: string] =
+    return getKeyAsyncImpl()
 
   template put(s: string) = stdout.write s
 
@@ -854,6 +866,22 @@ proc getKey*(): Key =
     if result == Key.None:
       if hasMouseInput():
         return Key.Mouse
+
+proc getKeyUnicode*(): tuple[key: Key, rune: string] =
+  ## Reads the next keystroke in a non-blocking manner. If there are no
+  ## keypress events in the buffer, `Key.None` is returned.
+  ##
+  ## If a mouse event was captured `Key.Mouse` is returned.
+  ## Call `getMouse()` to get the MouseInfo.
+  ##
+  ## If the module is not intialised, `IllwillError` is raised.
+  checkInit()
+  result = getKeyAsyncUnicode()
+  # echo result
+  when defined(windows):
+    if result.key == Key.None:
+      if hasMouseInput():
+        return (Key.Mouse, "")
 
 type
   TerminalChar* = object
